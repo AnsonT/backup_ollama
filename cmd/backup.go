@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 )
 
 var backupDir string
+var createZip bool
 
 // backupCmd represents the backup command
 var backupCmd = &cobra.Command{
@@ -35,6 +37,7 @@ var backupCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(backupCmd)
 	backupCmd.Flags().StringVarP(&backupDir, "dir", "d", "./backup", "Directory to save the backup")
+	backupCmd.Flags().BoolVarP(&createZip, "zip", "z", false, "Create a zip file of the backup and delete the original directory")
 }
 
 // validateModelName validates the model name string against the enumerated models.
@@ -199,6 +202,21 @@ func backupModel(modelName, dir string) error {
 
 	fmt.Printf("Saved manifest for %s:%s from registry %s in backup %s\n", model, version, registry, backupVersion)
 
+	// If createZip flag is set, create a zip file of the backup
+	if createZip {
+		zipFilePath := backupPath + ".zip"
+		if err := zipDirectory(backupPath, zipFilePath); err != nil {
+			return fmt.Errorf("failed to create zip file: %w", err)
+		}
+		fmt.Printf("Backup zipped successfully to '%s'\n", zipFilePath)
+
+		// Delete the original backup directory after successful zip creation
+		if err := os.RemoveAll(backupPath); err != nil {
+			return fmt.Errorf("failed to delete original backup directory: %w", err)
+		}
+		fmt.Printf("Original backup directory deleted after successful zip creation\n")
+	}
+
 	return nil
 }
 
@@ -221,5 +239,81 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
+	return nil
+}
+
+// zipDirectory creates a zip file from the given directory
+func zipDirectory(sourceDir, targetFile string) error {
+	// Create the zip file
+	zipFile, err := os.Create(targetFile)
+	if err != nil {
+		return fmt.Errorf("failed to create zip file: %w", err)
+	}
+	defer zipFile.Close()
+
+	// Create a new zip archive
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	// Walk through the directory and add files to the zip
+	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Create zip header with the relative path from the source directory
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+
+		// Set the name to be relative to the source directory
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath == "." {
+			return nil // Skip the root directory itself
+		}
+
+		// Ensure proper path separators for zip
+		header.Name = filepath.ToSlash(relPath)
+
+		// Set appropriate flags for directories
+		if info.IsDir() {
+			header.Name += "/" // Add trailing slash for directories
+			header.Method = zip.Store
+		} else {
+			header.Method = zip.Deflate // Use compression for files
+		}
+
+		// Create the file entry in the zip
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		// If it's a directory, no need to copy content
+		if info.IsDir() {
+			return nil
+		}
+
+		// Open and copy the file content
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to add files to zip: %w", err)
+	}
+
+	fmt.Printf("Created zip file: %s\n", targetFile)
 	return nil
 }
