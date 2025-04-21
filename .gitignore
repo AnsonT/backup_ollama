@@ -26,3 +26,4 @@ go.work.sum
 backup
 backup_ollama
 .history
+**/.DS_Store

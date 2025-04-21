@@ -15,9 +15,8 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
-// init initializes the root command and adds subcommands.
+// init initializes the root command.
+// Note: Subcommands are added in their respective files.
 func init() {
-	rootCmd.AddCommand(backupCmd)
-	rootCmd.AddCommand(restoreCmd)
-	rootCmd.AddCommand(listCmd)
+	// Commands are registered in their own files
 }
