@@ -1,0 +1,174 @@
+name: Build and Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: backup_ollama
+            asset_name: backup_ollama-linux-amd64
+          - os: macos-latest
+            artifact_name: backup_ollama
+            asset_name: backup_ollama-darwin-amd64
+          - os: windows-latest
+            artifact_name: backup_ollama.exe
+            asset_name: backup_ollama-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.18'
+          cache: true
+
+      - name: Build
+        run: go build -v -o ${{ matrix.artifact_name }}
+
+      - name: Import Code Signing Certificates (macOS)
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          
+          # Import certificate
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          
+          # Remove certificate file
+          rm certificate.p12
+        continue-on-error: true
+
+      - name: Sign Binary (macOS)
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          # Sign the binary
+          /usr/bin/codesign --force --options runtime --sign "$APPLE_IDENTITY" ${{ matrix.artifact_name }}
+          
+          # Verify signature
+          /usr/bin/codesign -vvv --deep --strict ${{ matrix.artifact_name }}
+        continue-on-error: true
+
+      - name: Sign Binary (Windows)
+        if: matrix.os == 'windows-latest' && env.WINDOWS_CERTIFICATE_BASE64 != ''
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          # Create certificate file
+          $certificatePath = Join-Path -Path $env:RUNNER_TEMP -ChildPath "certificate.pfx"
+          $certificateBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          [IO.File]::WriteAllBytes($certificatePath, $certificateBytes)
+          
+          # Sign the binary
+          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.17763.0\x64\signtool.exe"
+          & $signtool sign /f $certificatePath /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.sectigo.com /td sha256 /fd sha256 ${{ matrix.artifact_name }}
+          
+          # Remove certificate file
+          Remove-Item -Path $certificatePath
+        continue-on-error: true
+
+      - name: Sign Binary (Linux)
+        if: matrix.os == 'ubuntu-latest' && env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          # Import GPG key
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          
+          # Create a detached signature
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback -ab ${{ matrix.artifact_name }}
+        continue-on-error: true
+
+      - name: Archive Binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.asc
+
+      - name: Upload Release Asset
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./${{ matrix.artifact_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream
+
+      - name: Upload GPG Signature (Linux)
+        if: github.event_name == 'release' && matrix.os == 'ubuntu-latest' && env.GPG_PRIVATE_KEY != ''
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./${{ matrix.artifact_name }}.asc
+          asset_name: ${{ matrix.asset_name }}.asc
+          asset_content_type: text/plain
+        continue-on-error: true
+
+  generate-checksum:
+    name: Generate Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate SHA256 Checksums
+        run: |
+          find . -type f -not -name "*.asc" -not -name "checksums.txt" | sort | xargs sha256sum > checksums.txt
+          cat checksums.txt
+
+      - name: Upload Checksums Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: checksums
+          path: checksums.txt
+
+      - name: Upload Checksums to Release
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./checksums.txt
+          asset_name: checksums.txt
+          asset_content_type: text/plain
