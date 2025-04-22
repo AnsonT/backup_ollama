@@ -10,11 +10,14 @@ import (
 
 // ModelVersion represents information about a specific model version
 type ModelVersion struct {
-	Name    string
-	Path    string
-	Digest  string
-	Size    int64
-	Details map[string]interface{} // Parsed content of the version JSON file
+	Name       string
+	Path       string
+	Digest     string
+	Size       int64                  // Size of the manifest file only
+	TotalSize  int64                  // Total size including all blob files
+	BlobsSize  int64                  // Size of blob files only
+	BlobsCount int                    // Number of blob files
+	Details    map[string]interface{} // Parsed content of the version JSON file
 }
 
 // Model represents a model with its versions
@@ -83,6 +86,10 @@ func EnumerateOllamaModels() (*OllamaModelList, error) {
 	result := &OllamaModelList{
 		Registries: []Registry{},
 	}
+
+	// Path to blobs directory
+	ollamaDir := GetOllamaDirectory()
+	blobsDir := filepath.Join(ollamaDir, "models", "blobs")
 
 	// Step 1: List registry directories
 	registryEntries, err := os.ReadDir(manifestsDir)
@@ -157,15 +164,66 @@ func EnumerateOllamaModels() (*OllamaModelList, error) {
 				}
 
 				version := ModelVersion{
-					Name:    versionEntry.Name(),
-					Path:    versionPath,
-					Size:    fileInfo.Size(),
-					Details: versionInfo,
+					Name:       versionEntry.Name(),
+					Path:       versionPath,
+					Size:       fileInfo.Size(), // Manifest file size
+					TotalSize:  fileInfo.Size(), // Initialize with manifest size, will add blob sizes
+					BlobsSize:  0,               // Initialize blob size to 0
+					BlobsCount: 0,               // Initialize blob count to 0
+					Details:    versionInfo,
+				}
+
+				// Calculate blob sizes and update total size
+				if layers, ok := versionInfo["layers"].([]interface{}); ok {
+					for _, layer := range layers {
+						if layerMap, ok := layer.(map[string]interface{}); ok {
+							var blobPath string
+
+							// Determine blob path from either 'from' or 'digest' field
+							if from, ok := layerMap["from"].(string); ok {
+								blobPath = filepath.Join(ollamaDir, from)
+							} else if digest, ok := layerMap["digest"].(string); ok {
+								// Convert digest format from "sha256:123abc..." to "sha256-123abc..."
+								digestName := strings.Replace(digest, ":", "-", 1)
+								blobPath = filepath.Join(blobsDir, digestName)
+							} else {
+								// Skip this layer if neither from nor digest is present
+								continue
+							}
+
+							// Check if blob exists and get its size
+							if blobInfo, err := os.Stat(blobPath); err == nil {
+								blobSize := blobInfo.Size()
+								version.BlobsSize += blobSize // Add to blob-specific size
+								version.TotalSize += blobSize // Add to total size
+								version.BlobsCount++          // Increment blob count
+							}
+						}
+					}
 				}
 
 				// Extract digest if available
 				if digest, ok := versionInfo["digest"].(string); ok {
 					version.Digest = digest
+				} else {
+					// Try to extract digest from the manifest structure
+					// Check for config digest
+					if config, ok := versionInfo["config"].(map[string]interface{}); ok {
+						if configDigest, ok := config["digest"].(string); ok {
+							version.Digest = configDigest
+						}
+					}
+
+					// If config digest is not found, try to get the first layer digest
+					if version.Digest == "" {
+						if layers, ok := versionInfo["layers"].([]interface{}); ok && len(layers) > 0 {
+							if layer, ok := layers[0].(map[string]interface{}); ok {
+								if layerDigest, ok := layer["digest"].(string); ok {
+									version.Digest = layerDigest
+								}
+							}
+						}
+					}
 				}
 
 				model.Versions = append(model.Versions, version)

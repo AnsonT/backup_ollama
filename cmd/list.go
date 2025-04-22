@@ -35,6 +35,7 @@ detailed information from the version JSON files.`,
 }
 
 func init() {
+	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format (text, json)")
 	listCmd.Flags().BoolVarP(&showDetails, "details", "d", false, "Show detailed information from version files")
 }
@@ -91,24 +92,24 @@ func outputText(modelList *utils.OllamaModelList, details bool, totalRegs, total
 
 	for _, registry := range modelList.Registries {
 		fmt.Fprintf(w, "Registry: %s\n", registry.Name)
-		fmt.Fprintf(w, "  %-30s\t%-15s\t%-40s\n", "MODEL", "VERSIONS", "DIGEST")
-		fmt.Fprintf(w, "  %-30s\t%-15s\t%-40s\n", "-----", "--------", "------")
+		fmt.Fprintf(w, "  %-30s\t%-15s\t%-20s\n", "MODEL", "VERSIONS", "SIZE")
+		fmt.Fprintf(w, "  %-30s\t%-15s\t%-20s\n", "-----", "--------", "----")
 
 		for _, model := range registry.Models {
 			// Print the first version with the model name
 			firstVersion := model.Versions[0]
-			fmt.Fprintf(w, "  %-30s\t%-15s\t%-40s\n",
+			fmt.Fprintf(w, "  %-30s\t%-15s\t%-20s\n",
 				model.Name,
 				firstVersion.Name,
-				truncateString(firstVersion.Digest, 40))
+				formatBytes(firstVersion.TotalSize))
 
 			// Print the rest of the versions with indentation
 			for i := 1; i < len(model.Versions); i++ {
 				version := model.Versions[i]
-				fmt.Fprintf(w, "  %-30s\t%-15s\t%-40s\n",
+				fmt.Fprintf(w, "  %-30s\t%-15s\t%-20s\n",
 					"",
 					version.Name,
-					truncateString(version.Digest, 40))
+					formatBytes(version.TotalSize))
 			}
 
 			// If details are requested, print them for each version
@@ -116,7 +117,11 @@ func outputText(modelList *utils.OllamaModelList, details bool, totalRegs, total
 				for _, version := range model.Versions {
 					fmt.Fprintf(w, "    Version: %s\n", version.Name)
 					fmt.Fprintf(w, "    Path: %s\n", version.Path)
-					fmt.Fprintf(w, "    Size: %d bytes\n", version.Size)
+					fmt.Fprintf(w, "    Manifest Size: %s\n", formatBytes(version.Size))
+					fmt.Fprintf(w, "    Total Size: %s (%d blobs, %s)\n",
+						formatBytes(version.TotalSize),
+						version.BlobsCount,
+						formatBytes(version.BlobsSize))
 					fmt.Fprintf(w, "    Digest: %s\n", version.Digest)
 
 					// Print any other interesting details from the version file
@@ -144,4 +149,18 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// formatBytes converts bytes to a human-readable string (KB, MB, GB)
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
